@@ -6,5 +6,6 @@ __pycache__
 
 # IDE specific
 .idea
+.vscode
 poetry.lock
 pyproject.toml
