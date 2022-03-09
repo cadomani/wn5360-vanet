@@ -7,6 +7,9 @@ class Coordinates(NamedTuple):
     longitude: float
     latitude: float
 
+    def __repr__(self):
+        return f"[{self.longitude}, {self.latitude}]"
+
 
 @dataclass
 class PacketFields:

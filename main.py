@@ -1,6 +1,7 @@
 from vanet.vehicle import Vehicle, SensorData, Coordinates
 import random
 from sys import argv
+from urllib import request
 import socket
 
 MAX_TRAVEL_DELTA = 2.5      # Max number of coordinate points traveled in a single trip (variation)
@@ -43,8 +44,10 @@ def initialize_lead():
         (initial_position.latitude + delta_lat)  # % 90
     )
 
-    # Gather source address of lead vehicle
-    lead_addr = "TODO"
+    # Gather source address of lead vehicle using external service (without using requests module or upnp)
+    req = request.Request("https://checkip.amazonaws.com/")
+    res = request.urlopen(req)
+    lead_addr = str(res.read().decode('utf-8')).strip('\n')
 
     # Brake and gas pedals determine acceleration, their values are mutually exclusive
     pedal_choice = random.uniform(-100, 100)
@@ -68,7 +71,7 @@ def initialize_lead():
     )
 
     # Print parameters to console
-    print(f"VANET Fleet\nVehicle: Lead\nIP Address: {lead_addr}\nCoordinates:\n\tStart: {initial_position}\n\tEnd: {ending_position}\n")
+    print(f"VANET Fleet\nVehicle: Lead\nIP Address: {lead_addr}\nCoordinates:\n\tStart:\t{initial_position}\n\tEnd:\t{ending_position}\n")
 
     # lead = Vehicle(vehicle_properties=None)
 
