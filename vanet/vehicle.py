@@ -1,3 +1,4 @@
+import json
 import random
 import datetime
 from dataclasses import dataclass
@@ -109,18 +110,26 @@ class Vehicle:
 
         # Lead driver for n-cycles, start transmitting
         while not self.destination_reached:
+            # Await connection from client to generate new sensor values
+            incoming_data, client_address = self.socket.recvfrom(25)
+            print(str(incoming_data))
+
+            # Decide whether to send data or acknowledge subscription only
+            if "JOIN" in str(incoming_data):
+                print(f"Connection from fleet vehicle at {client_address[0]} established. Sending ACK.")
+                self.socket.sendto(b"ACK", client_address)
+                continue
+
             # For testing, only perform a certain number of updates before ending transmissions
             self.polls += 1
-
-            # Await connection from client to generate new sensor values
-            incoming_data, client_address = self.socket.recvfrom(40)
-            print(str(incoming_data))
 
             # Generate new values to use as a packet that can be transmitted
             VehicleSensor(self.data, self.instant_coordinates)
 
             # Reply to client with new sensor data
-            self.socket.sendto(b"40-bytes of data to send to client after", client_address)
+            to_send = json.dumps(self.data.__dict__)
+            print(to_send)
+            self.socket.sendto(bytes(to_send, 'utf-8'), client_address)
 
             # End ride after 30 sensor updates
             if self.polls >= 30:
@@ -128,12 +137,25 @@ class Vehicle:
 
     def _follow(self):
         # React to lead vehicle driving data if follower, generate data to send to subscribed vehicles
+        lead_response = False
         num_pkts = 0
         while not num_pkts >= 30:
-            # For testing, only perform a certain number of updates before ending transmissions
-            num_pkts += 1
+            # Send initial connection message to server to update initialization parameters
+            if not lead_response:
+                # Send initial message to server
+                self.socket.sendto(b"VANET.VEHICLE.01,JOIN~~~~", self.lead_address)
+                response_msg, server_address = self.socket.recvfrom(3)
 
-            # Send initial message to server
-            self.socket.sendto(b"40-bytes of data to send to server after", self.lead_address)
-            response_msg = self.socket.recvfrom(40)
-            print(response_msg[0])
+                # Verify server connection
+                if response_msg == b"ACK":
+                    print(f"Connection with lead vehicle at {server_address[0]} established at port {server_address[1]}. Requesting fleet sensor data.")
+                    lead_response = True
+                    continue
+                else:
+                    print("Initial fleet connection failed.")
+
+            # Send data request
+            self.socket.sendto(b"VANET.VEHICLE.01,REQUEST~", self.lead_address)
+            response_msg, server_address = self.socket.recvfrom(263)
+            print(str(response_msg))
+            num_pkts += 1
