@@ -11,7 +11,7 @@ def get_external_address():
     return str(res.read().decode('utf-8')).strip('\n')
 
 
-def initialize_vehicle(*, vehicle_sequence: int = 1, lead_addr: str):
+def initialize_vehicle(*, vehicle_sequence: int = 1, lead_addr: str, port: int):
     # Initialize vehicle to provide starting point for other vehicles, values updated after first packet received
     unset_coordinates = Coordinates(
         longitude=0,
@@ -19,7 +19,7 @@ def initialize_vehicle(*, vehicle_sequence: int = 1, lead_addr: str):
     )
     data = SensorData(
         sequence_number=vehicle_sequence,
-        source_address=get_external_address(),
+        source_address=(get_external_address(), port),
         gps_position=unset_coordinates,
         velocity=random.betavariate(3, 8) * MAX_VELOCITY,
         acceleration=0,
@@ -27,10 +27,10 @@ def initialize_vehicle(*, vehicle_sequence: int = 1, lead_addr: str):
         gas_throttle=0
     )
     print(f"VANET Fleet\nVehicle: Fleet\nLead Address: {lead_addr}\nCoordinates:\n\tStart:\tAwaiting Transmission\n\tEnd:\tAwaiting Transmission\n")
-    return Vehicle(data, destination_coordinates=unset_coordinates, vehicle_type="fleet", lead_address=lead_addr)
+    return Vehicle(data, destination_coordinates=unset_coordinates, vehicle_type="fleet", lead_address=(lead_addr, port))
 
 
-def initialize_lead():
+def initialize_lead(port: int):
     # Generate fleet starting coordinates
     initial_position = Coordinates(
         random.uniform(-180, 180),
@@ -50,7 +50,7 @@ def initialize_lead():
     )
 
     # Get external address
-    lead_addr = get_external_address()
+    lead_addr = (get_external_address(), port)
 
     # Brake and gas pedals determine acceleration, their values are mutually exclusive
     pedal_choice = random.uniform(-100, 100)
@@ -78,14 +78,15 @@ def initialize_lead():
     return Vehicle(data, destination_coordinates=ending_position, vehicle_type="lead", lead_address=lead_addr)
 
 
-def initialize_fleet(*, num_vehicles: int = 1, lead_addr: str):
+def initialize_fleet(*, num_vehicles: int = 1, lead_addr: str, port: int):
     """ Allows us to create n-number of vehicles that follow behind lead vehicle. """
     vehicles = []
     for i in range(0, num_vehicles):
         vehicles.append(
             initialize_vehicle(
                 vehicle_sequence=(i + 1),
-                lead_addr=(lead_addr if len(vehicles) == 0 else vehicles[i - 1].lead_address)
+                lead_addr=(lead_addr if len(vehicles) == 0 else vehicles[i - 1].lead_address),
+                port=port
             )
         )
     return vehicles
@@ -95,12 +96,12 @@ if __name__ == "__main__":
     """
     If vehicle is part of a fleet (params: fleet num_vehicles lead_addr port)
         main.py fleet 1 XXX.XXX.XXX.XXX XXXX
-    Otherwise (lead)
-        main.py lead
+    Otherwise (lead port)
+        main.py lead XXXX
     """
     vals = argv[1:]
     if vals[0] == "lead":
-        initialize_lead()
+        initialize_lead(int(vals[1]))
     else:
-        initialize_fleet(num_vehicles=int(vals[1]), lead_addr=vals[2])
+        initialize_fleet(num_vehicles=int(vals[1]), lead_addr=vals[2], port=int(vals[3]))
     print("\nVANET Transmission Ended")

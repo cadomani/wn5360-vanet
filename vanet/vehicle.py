@@ -23,7 +23,7 @@ class SensorData:
         GasThrottle:        0           -> 100
     """
     sequence_number: int
-    source_address: str
+    source_address: tuple
     gps_position: Coordinates
     velocity: float
     acceleration: float
@@ -76,7 +76,7 @@ class VehicleSensor:
 
 
 class Vehicle:
-    def __init__(self, initialization_data: SensorData, destination_coordinates: Coordinates, vehicle_type: str = "lead", lead_address: str = None):
+    def __init__(self, initialization_data: SensorData, destination_coordinates: Coordinates, vehicle_type: str = "lead", lead_address: tuple = None,):
         # Define an AF_INET UDP socket for data transmission and reception
         self.socket = socket(AF_INET, SOCK_DGRAM)
 
@@ -105,18 +105,23 @@ class Vehicle:
         sleep_rate = sample_rate ^ -1
 
         # Bind to address for listening
-        self.socket.bind((self.lead_address, 9888))
+        self.socket.bind(self.lead_address)
 
         # Lead driver for n-cycles, start transmitting
         while not self.destination_reached:
             # For testing, only perform a certain number of updates before ending transmissions
             self.polls += 1
 
+            # Await connection from client to generate new sensor values
+            incoming_data, client_address = self.socket.recvfrom(40)
+            print(str(incoming_data))
+
             # Generate new values to use as a packet that can be transmitted
             VehicleSensor(self.data, self.instant_coordinates)
-            incoming_data = self.socket.recvfrom(40)
-            print(incoming_data[0])
-            self.socket.sendto(b"40-bytes of data to send to client after", incoming_data[1])
+
+            # Reply to client with new sensor data
+            self.socket.sendto(b"40-bytes of data to send to client after", client_address)
+
             # End ride after 30 sensor updates
             if self.polls >= 30:
                 self.destination_reached = True
@@ -128,6 +133,7 @@ class Vehicle:
             # For testing, only perform a certain number of updates before ending transmissions
             num_pkts += 1
 
-            self.socket.sendto(b"40-bytes of data to send to server after", (self.lead_address, 9888))
+            # Send initial message to server
+            self.socket.sendto(b"40-bytes of data to send to server after", self.lead_address)
             response_msg = self.socket.recvfrom(40)
             print(response_msg[0])
