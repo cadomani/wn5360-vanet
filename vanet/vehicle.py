@@ -1,19 +1,13 @@
 import random
+import datetime
 from dataclasses import dataclass
 from socket import socket, AF_INET, SOCK_DGRAM
 from vanet.model.packet import Packet, PacketFields, Coordinates
 
-MAX_VEL = 300
-MAX_ACCEL = 30
-
-
-@dataclass
-class VehicleProperties:
-    address: str
-    make: str
-    model: str
-    plate: str
-    weight: int
+MAX_TRAVEL_DELTA = 2.5      # Max number of coordinate points traveled in a single trip (variation)
+MAX_VELOCITY     = 300      # Max velocity in Kilometers per hour, to facilitate equaltion calculations
+MAX_ACCELERATION = 10       # Max acceleration in m/s^2, eases math calculations
+SAMPLE_RATE      = 2        # Frequency of packet transmissions in Hertz
 
 
 @dataclass
@@ -38,10 +32,40 @@ class SensorData:
 
 
 class VehicleSensor:
-    def __init__(self, current_coordinates: Coordinates, end_coordinates: Coordinates, sample_rate: int):
-        """ Generate instantaneous sensor data based on initial inputs and a sample rate in Hertz. """
-        self.acceleration = random.uniform(0.0, MAX_ACCEL)
-        self.velocity     = random.betavariate(2, 10) * MAX_VEL
+    def __init__(self, previous_moment: SensorData, instant_coordinates: Coordinates):
+        """ Generate new instantaneous sensor data based on initial inputs. """
+        # Can probably be deepcopied a different way, or we can mutate values directly
+        # self.data = SensorData(
+        #     sequence_number=previous_moment.sequence_number,
+        #     source_address=previous_moment.source_address,
+        #     gps_position=previous_moment.gps_position,
+        #     velocity=previous_moment.velocity,
+        #     acceleration=previous_moment.acceleration,
+        #     brake_control=previous_moment.brake_control,
+        #     gas_throttle=previous_moment.gas_throttle
+        # )
+
+        # Pass by reference?
+        self.data = previous_moment
+        self.instant_coordinates = instant_coordinates
+
+        # Decide if inputs should change in this iteration
+        should_interact = random.choices([True, False], [0.15, 0.97])
+        if should_interact:
+            self._pedal_change()
+
+    def _pedal_change(self):
+        # Brake and gas pedals determine acceleration, their values are mutually exclusive
+        pedal_value = random.uniform(0, 100)
+        pedal_choice = random.uniform(0, 20)
+        if pedal_choice < 1:
+            self.data.brake_control = -pedal_value
+        else:
+            self.data.gas_throttle = pedal_value
+
+    def _determine_location(self):
+        # instant = self.instant_coordinates
+        pass
 
     def _calculate(self):
         """ Use previous acceleration to calculate velocity and new instantaneous position """
@@ -52,24 +76,26 @@ class VehicleSensor:
 
 
 class Vehicle:
-    def __init__(self, vehicle_properties: VehicleProperties, lead_address: str = None):
+    def __init__(self, initialization_data: SensorData, destination_coordinates: Coordinates, vehicle_type: str = "lead", lead_address: str = None):
         # Define an AF_INET UDP socket for data transmission and reception
         self.socket = socket(AF_INET, SOCK_DGRAM)
 
-        # Vehicle data
-        self.data: SensorData
-
-        # Unique vehicle parameters
-        self.properties = vehicle_properties
+        # Vehicle sensor data and packet instance
+        self.data: SensorData = initialization_data
+        self.packet_handler: Packet
 
         # Global flags
-        self.instant_coordinates: Coordinates
+        self.instant_coordinates = self.data.gps_position
+        self.destination_coordinates = destination_coordinates
         self.destination_reached = False
         self.polls = 0
 
         # Define lead or follower based on provided address
         self.lead_address = lead_address
-        if lead_address:
+        if vehicle_type == "lead":
+            # self.packet_handler = Packet(
+            #     fields=initialization_data,
+            # )
             self._drive(sample_rate=10)
         else:
             self._follow()
@@ -78,11 +104,30 @@ class Vehicle:
         # Generate driving data if lead vehicle
         sleep_rate = sample_rate ^ -1
 
+        # Bind to address for listening
+        self.socket.bind((self.lead_address, 9888))
+
+        # Lead driver for n-cycles, start transmitting
         while not self.destination_reached:
+            # For testing, only perform a certain number of updates before ending transmissions
+            self.polls += 1
+
+            # Generate new values to use as a packet that can be transmitted
+            VehicleSensor(self.data, self.instant_coordinates)
+            incoming_data = self.socket.recvfrom(40)
+            print(incoming_data[0])
+            self.socket.sendto(b"40-bytes of data to send to client after", incoming_data[1])
             # End ride after 30 sensor updates
             if self.polls >= 30:
                 self.destination_reached = True
 
     def _follow(self):
         # React to lead vehicle driving data if follower, generate data to send to subscribed vehicles
-        pass
+        num_pkts = 0
+        while not num_pkts >= 30:
+            # For testing, only perform a certain number of updates before ending transmissions
+            num_pkts += 1
+
+            self.socket.sendto(b"40-bytes of data to send to server after", (self.lead_address, 9888))
+            response_msg = self.socket.recvfrom(40)
+            print(response_msg[0])
