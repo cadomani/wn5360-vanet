@@ -2,6 +2,7 @@ import datetime
 from typing import ClassVar
 from pydantic import BaseModel, validator, ValidationError, root_validator, Field
 from ipaddress import IPv4Address
+import json
 
 
 class Coordinates(BaseModel):
@@ -91,7 +92,26 @@ class Packet(BaseModel):
     @staticmethod
     def interpret_packet(data: bytes):
         values = bytes.decode(data, 'utf-8').split('\n')
-        print(values)
+        pkt_dict = {}
+        for item in values:
+            k, _, v = item.partition(": ")
+            if k == "GPS":
+                v = json.loads(v)
+            pkt_dict[k.lower()] = v
+        try:
+            new_packet = Packet(
+                sequence_number=int(pkt_dict['seq']),
+                source_address=IPv4Address(pkt_dict['src']),
+                gps_position=Coordinates(longitude=float(pkt_dict['gps'][0]), latitude=float(pkt_dict['gps'][1])),
+                velocity=pkt_dict['vel'],
+                acceleration=pkt_dict['acc'],
+                brake_control=pkt_dict['brk'],
+                gas_throttle=pkt_dict['gas']
+            )
+        except Exception as e:
+            print(f"Corrupted packet: {str(e)}")
+            return None
+        return new_packet
 
     def get_packet(self) -> bytes:
         # Recreate all packet values

@@ -103,7 +103,7 @@ class LeadVehicle(Vehicle):
         self.destination_reached = False
         self.polls = 0
         self.followers = followers
-        self.sequence = 0
+        self.sequence = 1
 
         # Vehicle sensor data and packet instance
         self.sensor = VehicleSensor()
@@ -173,13 +173,11 @@ class FleetVehicle(Vehicle):
         while not num_pkts >= 1000:
             # Await packet from client to generate new sensor values
             incoming_data, client_address = self.socket.recvfrom(300)
-            decoded_data = bytes.decode(incoming_data, 'utf-8')
-            print(decoded_data)
 
-            # Decide whether to send ACK for data
-            if "VANET" in decoded_data:
-                dat = decoded_data.split('\n')
-                pkt = dat[1].split(" ")[1]
-                print(f"Packet #{pkt} received from {client_address[0]}. Sending ACK.")
-                self.socket.sendto(bytes(f"ACK {pkt}", 'utf-8'), client_address)
+            # Attempt to parse incoming packet
+            new_packet = Packet.interpret_packet(incoming_data)
+            if new_packet:
+                print(f"Packet #{new_packet.sequence_number} received from {client_address[0]}. Sending ACK.")
+                print(new_packet.dict())
+                self.socket.sendto(bytes(f"ACK {new_packet.sequence_number}", 'utf-8'), client_address)
                 num_pkts += 1
