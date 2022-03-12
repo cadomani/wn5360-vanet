@@ -40,9 +40,7 @@ class Packet(BaseModel):
         BrakeControl:       0           -> 100
         GasThrottle:        0           -> 100
     """
-    _timestamp: float = Field(default_factory=datetime.datetime.utcnow().timestamp())
-    _cleartext_packet_data: ClassVar[str]
-    _encoded_packet_data: ClassVar[bytes]
+    timestamp: float = None
     sequence_number: int
     source_address: IPv4Address
     gps_position: Coordinates
@@ -72,12 +70,9 @@ class Packet(BaseModel):
         return v
 
     @validator("brake_control", "gas_throttle")
-    def check_pedal_ranges(cls, v, values):
+    def check_pedal_ranges(cls, v):
         if v < 0 or v > 100:
             raise ValidationError("Pedal values should be between 0 and 100.")
-        if values.get('brake_control') and values.get('gas_throttle'):
-            if values['brake_control'] > 0 and values['gas_throttle'] > 0:
-                raise ValidationError("Both pedals cannot be engaged at once.")
         return v
 
     # GENERATORS
@@ -106,7 +101,8 @@ class Packet(BaseModel):
                 velocity=pkt_dict['vel'],
                 acceleration=pkt_dict['acc'],
                 brake_control=pkt_dict['brk'],
-                gas_throttle=pkt_dict['gas']
+                gas_throttle=pkt_dict['gas'],
+                timestamp=pkt_dict['clk']
             )
         except Exception as e:
             print(f"Corrupted packet: {str(e)}")
@@ -114,13 +110,16 @@ class Packet(BaseModel):
         return new_packet
 
     def get_packet(self) -> bytes:
+        # Timestamp packet
+        self.timestamp = datetime.datetime.utcnow().timestamp()
+
         # Recreate all packet values
         unprocessed_packet = \
 f'''VANET-V2V
 SEQ: {self.sequence_number}
 SRC: {self.source_address}
 CHK: $SENTINEL$
-CLK: {self._timestamp.default_factory}
+CLK: {self.timestamp}
 GPS: {self.gps_position}
 BRK: {self.brake_control}
 GAS: {self.gas_throttle}
@@ -133,3 +132,6 @@ VEL: {self.velocity}'''
         # Encode packet
         encoded_packet_data = bytes(cleartext_packet_data, 'utf-8')
         return encoded_packet_data
+
+    class Config:
+        validate_assignment = True

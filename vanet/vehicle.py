@@ -67,9 +67,11 @@ class VehicleSensor:
             pedal_value = random.uniform(0, 100)
             pedal_choice = random.uniform(0, 20)
             if pedal_choice < 1:
-                self.brake_control = -pedal_value
+                self.brake_control = pedal_value
+                self.gas_throttle = 0
             else:
                 self.gas_throttle = pedal_value
+                self.brake_control = 0
 
     def _determine_location(self):
         pass
@@ -79,7 +81,7 @@ class VehicleSensor:
         pass
 
     def update(self):
-        pass
+        self._pedal_change()
 
 
 class Vehicle:
@@ -99,6 +101,9 @@ class LeadVehicle(Vehicle):
     def __init__(self, address: str, followers: List[tuple]):
         super().__init__(vehicle_type="Lead", address=address)
 
+        # Set socket to non-blocking to allow for sending without waiting for acknowledgement
+        self.socket.settimeout(1)
+
         # Global flags
         self.destination_reached = False
         self.polls = 0
@@ -116,7 +121,6 @@ class LeadVehicle(Vehicle):
             brake_control=self.sensor.brake_control,
             gas_throttle=self.sensor.gas_throttle
         )
-        # PacketFields.interpret_packet(self.packet.get_packet())
 
         # Print parameters to console and back an initialized vehicle
         print(f"Coordinates:\n\tStart:\t{self.sensor.gps_initial}\n\tEnd:\t{self.sensor.gps_final}\n")
@@ -151,6 +155,10 @@ class LeadVehicle(Vehicle):
             # Generate new values to use as a packet that can be transmitted
             self.sensor.update()
             self.packet.sequence_number = self.sequence
+            self.packet.acceleration = self.sensor.acceleration
+            self.packet.velocity = self.sensor.velocity
+            self.packet.gas_throttle = self.sensor.gas_throttle
+            self.packet.brake_control = self.sensor.brake_control
 
             # End ride after 30 sensor updates
             if self.polls >= 30:
@@ -170,7 +178,7 @@ class FleetVehicle(Vehicle):
     def _follow(self):
         # React to lead vehicle driving data if follower, generate data to send to subscribed vehicles
         num_pkts = 0
-        while not num_pkts >= 1000:
+        while not num_pkts >= 30:
             # Await packet from client to generate new sensor values
             incoming_data, client_address = self.socket.recvfrom(300)
 
