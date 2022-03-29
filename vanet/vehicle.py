@@ -1,4 +1,7 @@
+import datetime
 import random
+import threading
+import time
 from socket import socket, AF_INET, SOCK_DGRAM
 from typing import List
 
@@ -137,15 +140,21 @@ class LeadVehicle(Vehicle):
 
         # Lead driver for n-cycles, start transmitting
         while not self.destination_reached:
+            # Obtain new packet
+            new_packet = self.packet.get_packet()
+
             # Start broadcasting blindly to clients
-            print(f"Broadcasted Sequence #{self.sequence}")
-            self.socket.sendto(self.packet.get_packet(), follower)
+            print(f"Broadcasted Sequence #{self.sequence}. Waiting 100ms before next retransmission.")
+            print(f"DATA: {bytes.decode(new_packet, 'utf-8')}")
+            self.socket.sendto(new_packet, follower)
             response_msg, server_address = self.socket.recvfrom(8)
             decoded_data = bytes.decode(response_msg, 'utf-8')
 
             # Verify server connection
+            timestamp_received = -1.0
             if "ACK" in decoded_data:
                 print(f"Sequence #{decoded_data.split(' ')[1]} ACK'ed by {server_address[0]}")
+                timestamp_received = datetime.datetime.utcnow().timestamp()
                 acknowledgements += 1
 
             # For testing, only perform a certain number of updates before ending transmissions
@@ -163,6 +172,14 @@ class LeadVehicle(Vehicle):
             # End ride after 30 sensor updates
             if self.polls >= 30:
                 self.destination_reached = True
+
+            # Sleep for 100 milliseconds
+            transmission_delay = timestamp_received - self.packet.timestamp
+            if transmission_delay < 0.1 and timestamp_received != -1:
+                print(f"Acknowledgment received {int(transmission_delay * 1000)}ms after broadcast. Waiting an additional {100 - int(transmission_delay * 1000)}ms to send another transmission.\n")
+                time.sleep(0.1 - transmission_delay)
+            elif transmission_delay > 0.1:
+                print(f"Acknowledgement received over 100ms after broadcast ({int(transmission_delay * 1000)}ms). Sending next packet immediately.\n")
 
 
 class FleetVehicle(Vehicle):
@@ -185,7 +202,7 @@ class FleetVehicle(Vehicle):
             # Attempt to parse incoming packet
             new_packet = Packet.interpret_packet(incoming_data)
             if new_packet:
-                print(f"Packet #{new_packet.sequence_number} received from {client_address[0]}. Sending ACK.")
-                print(new_packet.dict())
+                print(f"Packet #{new_packet.sequence_number} received from {client_address[0]}. Sending ACK #{new_packet.sequence_number}.")
+                print(f"{new_packet.dict()}\n")
                 self.socket.sendto(bytes(f"ACK {new_packet.sequence_number}", 'utf-8'), client_address)
                 num_pkts += 1

@@ -26,6 +26,13 @@ if __name__ == "__main__":
         main.py fleet XXXX
     Otherwise (lead port)
         main.py lead XX.XX.XX.XX XXXX
+          
+    Sample test:
+        # Run fleet on remote machine and listen on port 9999
+        python3 main.py fleet 9999
+        
+        # Run lead on remote machine and broadcast on port 9999
+        python3 lead <REMOTE_IP_ADDRESS> 9999
     """
     vals = argv[1:]
     if vals[0] == "lead":
