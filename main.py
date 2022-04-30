@@ -1,6 +1,7 @@
 from sys import argv
 from urllib import request
-from vanet.vehicle import FleetVehicle, LeadVehicle
+from vanet.vehicle import Client, FleetVehicle, LeadVehicle
+
 
 
 def get_external_address():
@@ -35,8 +36,32 @@ if __name__ == "__main__":
         python3 lead <REMOTE_IP_ADDRESS> 9999
     """
     vals = argv[1:]
+    vehicle_names = ['X', 'Y', 'Z', 'EC']
     if vals[0] == "lead":
-        lead = LeadVehicle(get_external_address(), [(str(vals[1]), int(vals[2]))])
+        clients = []
+        for i in range(1, len(vals) - 1):
+            clients.append(
+                Client(
+                    name=vehicle_names[i],
+                    address=str(vals[i]),
+                    port=int(vals[-1]),
+                    vehicle_ahead=None,
+                    vehicle_behind=None,
+                    order=i-1
+                )
+            )
+        # Reorganize based on order
+        for client in clients:
+            if client.order == 0:
+                # only behind
+                client.vehicle_behind = clients[client.order + 1]
+            elif client.order == len(clients) - 1:
+                # only ahead
+                client.vehicle_ahead = clients[client.order - 1]
+            else:
+                client.vehicle_ahead = clients[client.order - 1]
+                client.vehicle_behind = clients[client.order + 1]
+        lead = LeadVehicle(get_external_address(), clients)
     else:
         initialize_fleet(num_vehicles=1, port=int(vals[1]))
     print("\nVANET Transmission Ended")

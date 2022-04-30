@@ -1,5 +1,4 @@
 import datetime
-from typing import ClassVar
 from pydantic import BaseModel, validator, ValidationError, root_validator, Field
 from ipaddress import IPv4Address
 import json
@@ -43,11 +42,13 @@ class Packet(BaseModel):
     timestamp: float = None
     sequence_number: int
     source_address: IPv4Address
+    destination_address: IPv4Address
     gps_position: Coordinates
     velocity: float
     acceleration: float
     brake_control: float
     gas_throttle: float
+    transmission_range: float
 
     # VALIDATORS
 
@@ -97,12 +98,14 @@ class Packet(BaseModel):
             new_packet = Packet(
                 sequence_number=int(pkt_dict['seq']),
                 source_address=IPv4Address(pkt_dict['src']),
+                destination_address=IPv4Address(pkt_dict['dst']),
                 gps_position=Coordinates(longitude=float(pkt_dict['gps'][0]), latitude=float(pkt_dict['gps'][1])),
                 velocity=pkt_dict['vel'],
                 acceleration=pkt_dict['acc'],
                 brake_control=pkt_dict['brk'],
                 gas_throttle=pkt_dict['gas'],
-                timestamp=pkt_dict['clk']
+                timestamp=pkt_dict['clk'],
+                transmission_range=pkt_dict['rng']
             )
         except Exception as e:
             print(f"Corrupted packet: {str(e)}")
@@ -118,13 +121,15 @@ class Packet(BaseModel):
 f'''VANET-V2V
 SEQ: {self.sequence_number}
 SRC: {self.source_address}
+DST: {self.destination_address}
 CHK: $SENTINEL$
 CLK: {self.timestamp}
 GPS: {self.gps_position}
 BRK: {self.brake_control}
 GAS: {self.gas_throttle}
 ACC: {self.acceleration}
-VEL: {self.velocity}'''
+VEL: {self.velocity}
+RNG: {self.transmission_range}'''
 
         # Calculate checksum and insert
         cleartext_packet_data = unprocessed_packet.replace('$SENTINEL$', self._calculate_checksum(unprocessed_packet))

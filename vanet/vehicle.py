@@ -1,17 +1,41 @@
+from __future__ import annotations
+
 import datetime
 import random
-import threading
 import time
 from socket import socket, AF_INET, SOCK_DGRAM
-from typing import List
+from typing import List, Tuple
+from dataclasses import dataclass
+from ipaddress import IPv4Address
 
 from vanet.model.packet import Packet, Coordinates
-from ipaddress import IPv4Address
 
 MAX_TRAVEL_DELTA = 2.5      # Max number of coordinate points traveled in a single trip (variation)
 MAX_VELOCITY     = 300      # Max velocity in Kilometers per hour, to facilitate equaltion calculations
 MAX_ACCELERATION = 10       # Max acceleration in m/s^2, eases math calculations
 SAMPLE_RATE      = 2        # Frequency of packet transmissions in Hertz
+
+
+@dataclass
+class Client:
+    """ Representation of a client from which packets are sent and received. """
+    name: str
+    address: str
+    port: int
+    vehicle_ahead: Client
+    vehicle_behind: Client
+    order: int
+    last_received: int = 0
+    out_of_range: bool = False
+
+    def get_address_pair(self) -> Tuple[str, int] :
+        return self.address, self.port
+
+    def __str__(self):
+        return f"Fleet Vehicle {self.name}"
+
+    def __eq__(self, other):
+        return other == self.address
 
 
 class VehicleSensor:
@@ -101,28 +125,32 @@ class Vehicle:
 
 
 class LeadVehicle(Vehicle):
-    def __init__(self, address: str, followers: List[tuple]):
+    def __init__(self, address: str, followers: List[Client]):
         super().__init__(vehicle_type="Lead", address=address)
 
         # Set socket to non-blocking to allow for sending without waiting for acknowledgement
-        self.socket.settimeout(1)
+        self.socket.settimeout(2)
 
         # Global flags
         self.destination_reached = False
         self.polls = 0
         self.followers = followers
         self.sequence = 1
+        self.periodic_delay_ms = 2000
+        self.periodic_delay_s = self.periodic_delay_ms / 1000
 
         # Vehicle sensor data and packet instance
         self.sensor = VehicleSensor()
         self.packet = Packet(
             sequence_number=self.sequence,
             source_address=IPv4Address(address),
+            destination_address=IPv4Address(address),
             gps_position=self.sensor.gps_instant,
             velocity=self.sensor.velocity,
             acceleration=self.sensor.acceleration,
             brake_control=self.sensor.brake_control,
-            gas_throttle=self.sensor.gas_throttle
+            gas_throttle=self.sensor.gas_throttle,
+            transmission_range=50.0
         )
 
         # Print parameters to console and back an initialized vehicle
@@ -131,31 +159,88 @@ class LeadVehicle(Vehicle):
         self._drive(sample_rate=10)
 
     def _drive(self, *, sample_rate: int):
-        # Generate driving data if lead vehicle
-        sleep_rate = sample_rate ^ -1
-
-        # Assume only a single fleet vehicle for now
-        follower = self.followers[0]
-        acknowledgements = 0
+        # Log number of total acknowledgements
+        total_acknowledgements = 0
 
         # Lead driver for n-cycles, start transmitting
         while not self.destination_reached:
-            # Obtain new packet
+            # Obtain new packet to show
             new_packet = self.packet.get_packet()
+            packets_sent = 0
+            acknowledgements_received = 0
 
             # Start broadcasting blindly to clients
-            print(f"Broadcasted Sequence #{self.sequence}. Waiting 100ms before next retransmission.")
-            print(f"DATA: {bytes.decode(new_packet, 'utf-8')}")
-            self.socket.sendto(new_packet, follower)
-            response_msg, server_address = self.socket.recvfrom(8)
-            decoded_data = bytes.decode(response_msg, 'utf-8')
+            print(f"Broadcasted SEQ #{self.sequence} to client(s):")
+            for follower in self.followers:
+                # Update destination address before sending
+                self.packet.destination_address = IPv4Address(follower.address)
 
-            # Verify server connection
+                # Send normally if not marked out of range
+                print(f'\t{follower}')
+                if not follower.out_of_range:
+                    # Update address before sending
+                    self.socket.sendto(self.packet.get_packet(), follower.get_address_pair())
+                else:
+                    # Find the first vehicle in the chain that we can tunnel through
+                    forwarder = None
+                    parent_vehicle = follower.vehicle_ahead
+                    while forwarder is None:
+                        # Assert that we're not trying to tunnel through and missed the first vehicle
+                        if follower.order == 0 or parent_vehicle is None:
+                            raise NotImplementedError("Shouldn't be finding the follower of the second vehicle...")
+
+                        # Keep track of the current vehicle and find the first parent that is not out of bounds
+                        print(f"\t\tforwarded by {parent_vehicle}")
+                        if not parent_vehicle.out_of_range:
+                            forwarder = parent_vehicle
+                        parent_vehicle = parent_vehicle.vehicle_ahead
+
+                    # Found the forwarder to tunnel through, now we can tunnel
+                    self.socket.sendto(self.packet.get_packet(), forwarder.get_address_pair())
+                packets_sent += 1
+            print("Waiting 2000ms before next retransmission.")
+
+            # TODO: This shows a sample packet instead of all packets to avoid bloating screen, at the end replace it with all
+            # print("\nDATA: \n\t" + bytes.decode(new_packet, 'utf-8').replace('\n', '\n\t'))
+            print("\n")
+
+            # Listen until timeout until all packages come in, unless there is a timeout
             timestamp_received = -1.0
-            if "ACK" in decoded_data:
-                print(f"Sequence #{decoded_data.split(' ')[1]} ACK'ed by {server_address[0]}")
-                timestamp_received = datetime.datetime.utcnow().timestamp()
-                acknowledgements += 1
+            try:
+                while packets_sent != acknowledgements_received:
+                    # Receive 8 bytes from a single client
+                    response_msg, server_address = self.socket.recvfrom(8)
+                    acknowledgements_received += 1
+                    decoded_data = bytes.decode(response_msg, 'utf-8')
+
+                    # Verify server connection
+                    if "ACK" in decoded_data:
+                        try:
+                            # Find client from packet address
+                            client = self.followers[self.followers.index(server_address[0])]
+                            client.last_received += 1
+                            print(f"SEQ #{decoded_data.split(' ')[1]} ACK'ed by {client.name}")
+                        except ValueError:
+                            raise NotImplementedError("\t[ERROR]\tClient was not found, is the IP address set correctly in the header?")
+
+                        # Keep only the first timestamp as it is the one associated with retransmission
+                        if timestamp_received == -1.0:
+                            timestamp_received = datetime.datetime.utcnow().timestamp()
+                        total_acknowledgements += 1
+                    else:
+                        raise NotImplementedError()
+            except TimeoutError as e:
+                # Find follower
+                for follower in self.followers:
+                    if follower.last_received != self.sequence:
+                        # If the follower order is for the next vehicle, end immediately for now TODO: simply try retransmission of new immediately (unstable connection)
+                        if follower.order == 0:
+                            raise NotImplementedError(f"\t[ERROR]\tTransmission failed to first following truck ({follower.name})")
+
+                        # Mark client as one needing tunneling
+                        print(f"{follower} never acknowledged SEQ #{self.sequence}")
+                        print(f"\t will attempt to tunnel through {self.followers[follower.order - 1]} next time")
+                        follower.out_of_range = True
 
             # For testing, only perform a certain number of updates before ending transmissions
             self.polls += 1
@@ -173,21 +258,28 @@ class LeadVehicle(Vehicle):
             if self.polls >= 30:
                 self.destination_reached = True
 
-            # Sleep for 100 milliseconds
+            # Sleep for 2000 milliseconds
             transmission_delay = timestamp_received - self.packet.timestamp
-            if transmission_delay < 0.1 and timestamp_received != -1:
-                print(f"Acknowledgment received {int(transmission_delay * 1000)}ms after broadcast. Waiting an additional {100 - int(transmission_delay * 1000)}ms to send another transmission.\n")
-                time.sleep(0.1 - transmission_delay)
-            elif transmission_delay > 0.1:
-                print(f"Acknowledgement received over 100ms after broadcast ({int(transmission_delay * 1000)}ms). Sending next packet immediately.\n")
+            if transmission_delay < self.periodic_delay_ms and timestamp_received != -1:
+                print(f"Initial ACK received {int(transmission_delay * 1000)}ms after broadcast.\nWaiting an additional {self.periodic_delay_ms - int(transmission_delay * 1000)}ms to send next packet.\n")
+                sleep_delay = self.periodic_delay_s - transmission_delay
+                if sleep_delay > 0:
+                    # Paused due to debugging, but should continue instead of crashing
+                    time.sleep(sleep_delay)
+            elif transmission_delay > self.periodic_delay_s:
+                print(f"Acknowledgement received over 100ms after broadcast ({int(transmission_delay * 1000)}ms).\nSending next packet immediately.\n")
 
 
 class FleetVehicle(Vehicle):
     def __init__(self, address: tuple):
         super().__init__(vehicle_type="Fleet", address=address[0])
-
         # Bind to address for listening
         self.socket.bind(address)
+
+        # Variables
+        # self.last_seq = -1
+        # self.position = -1
+        # self.lead = LeadVehicle()
 
         # Set to following mode
         self._follow()
