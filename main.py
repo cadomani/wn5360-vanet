@@ -3,22 +3,11 @@ from urllib import request
 from vanet.vehicle import Client, FleetVehicle, LeadVehicle
 
 
-
 def get_external_address():
     # Gather source address of lead vehicle using external service (without using requests module or upnp)
     req = request.Request("https://checkip.amazonaws.com/")
     res = request.urlopen(req)
     return str(res.read().decode('utf-8')).strip('\n')
-
-
-def initialize_fleet(*, num_vehicles: int = 1, port: int):
-    """ Allows us to create n-number of vehicles that follow behind lead vehicle. """
-    vehicles = []
-    for i in range(0, num_vehicles):
-        vehicles.append(
-            FleetVehicle((get_external_address(), port))
-        )
-    return vehicles
 
 
 if __name__ == "__main__":
@@ -63,5 +52,6 @@ if __name__ == "__main__":
                 client.vehicle_behind = clients[client.order + 1]
         lead = LeadVehicle(get_external_address(), clients)
     else:
-        initialize_fleet(num_vehicles=1, port=int(vals[1]))
+        address_pair = (get_external_address(), int(vals[2]))
+        fleet = FleetVehicle(vehicle_name=str(vals[1]), address=address_pair)
     print("\nVANET Transmission Ended")
