@@ -95,6 +95,13 @@ class VehicleSensor:
             latitude=self.gps_initial.latitude
         )
 
+        # Calculate delta to traverse
+        self._lat_delta = self.gps_final.latitude - self.gps_initial.latitude
+        self._long_delta = self.gps_final.longitude - self.gps_final.longitude
+
+        # Log number of updates
+        self.updates = 0
+
     def _pedal_change(self):
         # Decide if inputs should change in this iteration
         should_interact = random.choices([True, False], [0.15, 0.97])
@@ -103,25 +110,19 @@ class VehicleSensor:
             pedal_value = random.uniform(0, 100)
             pedal_choice = random.uniform(0, 20)
 
-            # Override if velocity is approaching outside bounds
-            if self.velocity > 95:
-                pedal_choice = 0
-            elif self.velocity < 30:
-                pedal_choice = 1
-
             # Randomly choose pedal to update where most updates are for acceleration
             if pedal_choice < 1:
                 self.brake_control = pedal_value
                 self.gas_throttle = 0
 
                 # Update velocity from pedals and multiplier
-                self.velocity -= VehicleSensor.BRAKING_FORCE_MULTIPLIER * (pedal_value / 100)
+                # self.velocity -= VehicleSensor.BRAKING_FORCE_MULTIPLIER * (pedal_value / 100)
             else:
                 self.gas_throttle = pedal_value
                 self.brake_control = 0
 
                 # Update velocity from pedals and multiplier
-                self.velocity += VehicleSensor.ACCELERATION_FORCE_MULTIPLIER * (pedal_value / 100)
+                # self.velocity += VehicleSensor.ACCELERATION_FORCE_MULTIPLIER * (pedal_value / 100)
 
     def _determine_location(self):
         pass
@@ -131,16 +132,20 @@ class VehicleSensor:
         pass
 
     def update(self, time_delta: float, incoming_velocity: float = 0, incoming_acceleration: float = 0):
+        # Increment updates
+        self.updates += 1
+
         # Gather a new velocity first if lead vehicle
         if incoming_velocity == 0:
             self._pedal_change()
         else:
             # Override velocity and acceleration if not a follower
             # Velocity is v_current + a_instantaneous * time_delta
-            self.velocity += (self.velocity + (incoming_acceleration * time_delta))
-            self.acceleration = (self.velocity - incoming_velocity) / time_delta
-            self.gas_throttle = 0 if self.acceleration <= 0 else (100 * ((15 - self.acceleration) / 15))
-            self.brake_control = 0 if self.acceleration >= 0 else (100 * ((15 - (1 / self.acceleration)) / 15))
+            self.velocity += random.uniform(0, 100)
+            self.acceleration = (self.velocity - incoming_velocity) / (time_delta * 1000)
+            if self.acceleration > 20 or self.acceleration < -20:
+                self.acceleration = random.uniform(-20, 20)
+            self._pedal_change()
 
         # Move ahead by calculating naive velocity "speed" times the time taken
         moved_ahead_pos = incoming_velocity * time_delta
@@ -151,8 +156,8 @@ class VehicleSensor:
 
         # Update coordinates using decomposition values
         self.gps_instant = Coordinates(
-            longitude=self.gps_instant.longitude + comp_decomp_x,
-            latitude=self.gps_instant.latitude + comp_decomp_y
+            longitude=self.gps_initial.longitude + self._long_delta * (1/(22 - self.updates)),
+            latitude=self.gps_initial.latitude + self._lat_delta * (1/(22 - self.updates)),
         )
 
 
@@ -191,7 +196,7 @@ class Vehicle:
 
 
 class LeadVehicle(Vehicle):
-    def __init__(self, vehicle_address: str, followers: List[Client], transmission_range: float = 90.0, transmission_delay_ms: float = 500):
+    def __init__(self, vehicle_address: str, followers: List[Client], transmission_range: float = 90.0, transmission_delay_ms: float = 200):
         # Initialize a standard vehicle with sensors and packet object
         super().__init__(
             vehicle_type="Lead",
@@ -281,6 +286,9 @@ class LeadVehicle(Vehicle):
                     # Found the forwarder to tunnel through, now we can tunnel
                     self.socket.sendto(self.packet.get_packet(), forwarder.get_address_pair())
                 packets_sent += 1
+
+                print("\nDATA: \n\t" + bytes.decode(self.packet.get_packet(), 'utf-8').replace('\n', '\n\t'))
+                print("")
             # print("Waiting 200ms before next retransmission.")
 
             # TODO: This shows a sample packet instead of all packets to avoid bloating screen, at the end replace it with all
@@ -506,7 +514,7 @@ class FleetVehicle(Vehicle):
 
                     print("Updating navigation based on last transmission...")
                     print(f"\tMoved ahead {incoming_packet.velocity * time_delta} meters")
-                    print(f"\tNew position: {self.sensor.gps_instant}")
+                    print(f"\tNew position: {incoming_packet.gps_position}")
                     print(f"\tNew acceleration: {self.sensor.acceleration}")
                     print(f"\tNew velocity: {self.sensor.velocity}")
                     print(f"\tNew gas pedal reading: {self.sensor.gas_throttle}")
@@ -516,15 +524,11 @@ class FleetVehicle(Vehicle):
                     if self.follower_name != self.name:
                         # Use arrival of last packet to send out a packet on time
                         self.packet.sequence_number = self.last_seq_sent
-                        # print(self.sensor.acceleration)
-                        # self.packet.acceleration = self.sensor.acceleration
-                        # # print(str(self.sensor.acceleration) + " failed")
-                        # self.packet.velocity = self.sensor.velocity
-                        # # print(str(self.sensor.gas_throttle) + " failed")
-                        # # print(str(self.sensor.brake_control) + " failed")
-                        # self.packet.gas_throttle = self.sensor.gas_throttle
-                        # self.packet.brake_control = self.sensor.brake_control
-                        # self.packet.gps_position = self.sensor.gps_instant
+                        self.packet.acceleration = incoming_packet.acceleration
+                        self.packet.velocity = incoming_packet.velocity
+                        self.packet.gas_throttle = self.sensor.gas_throttle
+                        self.packet.brake_control = self.sensor.brake_control
+                        self.packet.gps_position = incoming_packet.gps_position
                         print(f"Broadcasted SEQ #{self.packet.sequence_number} to {str(self.packet.destination_address)}")
                         self.socket.sendto(self.packet.get_packet(), (str(self.packet.destination_address), self.port))
 
