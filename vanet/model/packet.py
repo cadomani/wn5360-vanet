@@ -153,6 +153,7 @@ RNG: {self.transmission_range}'''
 class Acknowledgement:
     sequence: int = -1
     origin_address: str = ""
+    destination_address: str = ""
     vehicle_name: str = ""
 
     def process_packet(self, data: bytes):
@@ -163,13 +164,14 @@ class Acknowledgement:
 
         # Process packet fields
         values = decoded_data.split(" ")
-        if len(values) != 4 or values[0] != "ACK":
+        if len(values) != 5 or values[0] != "ACK":
             raise ValueError("Acknowledgement packet arrived corrupted.")
 
         # Unpack values
         self.sequence = int(values[1])
         self.origin_address = str(values[2])
-        self.vehicle_name = str(values[3])
+        self.destination_address = str(values[3])
+        self.vehicle_name = str(values[4])
 
         # Return instance of self to allow for instant use
         return self

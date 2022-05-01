@@ -60,6 +60,6 @@ if __name__ == "__main__":
                 client.vehicle_behind = clients[client.order + 1]
         lead = LeadVehicle(get_external_address(), clients)
     else:
-        address_pair = (get_external_address(), int(vals[4]))
-        fleet = FleetVehicle(vehicle_name=str(vals[1]), vehicle_address=address_pair, follower_address=vals[2], follower_name=vals[3], transmission_range=float(vals[5]))
+        address_pair = (get_external_address(), int(vals[6]))
+        fleet = FleetVehicle(vehicle_name=str(vals[1]), vehicle_address=address_pair, following_address=vals[2], following_name=vals[3], follower_address=vals[4], follower_name=vals[5], transmission_range=float(vals[7]))
     print("\nVANET Transmission Ended")

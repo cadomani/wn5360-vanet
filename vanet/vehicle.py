@@ -191,7 +191,7 @@ class Vehicle:
 
 
 class LeadVehicle(Vehicle):
-    def __init__(self, vehicle_address: str, followers: List[Client], transmission_range: float = 90.0, transmission_delay_ms: float = 5000):
+    def __init__(self, vehicle_address: str, followers: List[Client], transmission_range: float = 90.0, transmission_delay_ms: float = 500):
         # Initialize a standard vehicle with sensors and packet object
         super().__init__(
             vehicle_type="Lead",
@@ -203,7 +203,7 @@ class LeadVehicle(Vehicle):
         )
 
         # Set socket to non-blocking to allow for sending without waiting for acknowledgement
-        self.socket.settimeout(0.2)
+        self.socket.settimeout(transmission_delay_ms / 1000)
 
         # Global flags
         self.polls = 0
@@ -365,7 +365,7 @@ class LeadVehicle(Vehicle):
 
 
 class FleetVehicle(Vehicle):
-    def __init__(self, vehicle_name: str, vehicle_address: tuple, follower_address: str, follower_name: str, transmission_range: float):
+    def __init__(self, vehicle_name: str, following_address: str, following_name: str, vehicle_address: tuple, follower_address: str, follower_name: str, transmission_range: float):
         # Initialize a fleet vehicle type
         super().__init__(
             vehicle_type="Fleet",
@@ -380,14 +380,17 @@ class FleetVehicle(Vehicle):
         self.socket.bind(self.address_pair)
 
         # Transmission variables
-        self.lead_address = None
         self.last_seq = 0
         self.last_seq_forwarded = 0
-        self.last_seq_followed = 0
-        self.vehicle_ahead_address = None
+        self.last_seq_sent = 0
+        self.last_seq_received = 0
         self.last_pkt_recv_time = None
+        self.following_address = (following_address, self.port) if following_name != "Lead" else None
+        self.following_name = following_name
 
         # Print out following vehicles
+        if self.following_name != "Lead":
+            print(f"Vehicle ahead:\t{self.following_name} ({self.following_address[0]})")
         if self.follower_name != self.name:
             print(f"Rear Vehicle:\t {self.follower_name} ({self.follower_address})")
         else:
@@ -406,27 +409,28 @@ class FleetVehicle(Vehicle):
             # Await packet from client to generate new sensor values
             incoming_data, client_address = self.socket.recvfrom(300)
 
-            # Capture lead address if this is the first, but not if we don't know the lead address yet
-            if not self.vehicle_ahead_address and self.lead_address and len(incoming_data) > 100:
-                if self.lead_address[0] == client_address[0]:
-                    self.vehicle_ahead_address = self.lead_address
-                else:
-                    self.vehicle_ahead_address = client_address
-                print(f"SET VEHICLE AHEAD ADDRESS TO {self.vehicle_ahead_address}")
-
             # Assume this is an acknowledgement packet first if it's under a certain length, and do not process ACK requests until we know what the lead address is
-            if len(incoming_data) < 50 and self.lead_address:
+            if len(incoming_data) < 50:
                 # Attempt to parse incoming packet
                 incoming_packet = Acknowledgement().process_packet(data=incoming_data)
 
-                # If processing does not fail, proceed to forward acknowledgement
-                if not self.vehicle_ahead_address:
-                    self.vehicle_ahead_address = self.lead_address
-                print(f"Forwarding ACK #{incoming_packet.sequence} from Fleet Vehicle {incoming_packet.vehicle_name} to {self.vehicle_ahead_address}")
-                self.socket.sendto(incoming_data, self.vehicle_ahead_address)
+                # Dynamically set the IP address of the vehicle at the front of the line
+                if not self.following_address:
+                    self.following_address = client_address
 
-                # Set last sequence forwarded so we don't shut this vehicle down if it needs to continue to forward packets
-                self.last_seq_forwarded = incoming_packet.sequence
+                # See if the packet belongs to us and we can keep it instead of forwarding it
+                if incoming_packet.destination_address == self.address:
+                    print(f"Received ACK from {incoming_packet.vehicle_name}.")
+                    print(f"\t└ SEQ #{incoming_packet.sequence}")
+                    self.last_seq_sent += 1
+                else:
+                    print(f"Forwarding ACK #{incoming_packet.sequence}\n\t Fleet Vehicle {incoming_packet.vehicle_name} -> {self.following_name}")
+                    if self.following_address is None:
+                        print("Skipping because we cannot find a following address...")
+                    self.socket.sendto(incoming_data, self.following_address)
+
+                    # Set last sequence forwarded so we don't shut this vehicle down if it needs to continue to forward packets
+                    self.last_seq_forwarded = incoming_packet.sequence
                 continue
 
             # Otherwise, try to process as a data packet
@@ -434,24 +438,17 @@ class FleetVehicle(Vehicle):
 
             # Process packet if it is not empty
             if incoming_packet:
-                # Capture lead address if this is the first run
-                if not self.lead_address and str(incoming_packet.source_address) == client_address[0]:
-                    self.lead_address = client_address
-                    print(f"SET LEAD ADDRESS TO {self.lead_address}")
-
                 # If the packet address is the same as the sender (not being forwarded), it should not surpass the range boundary {' forwarded by' if client_address[0] != self.lead_address_pair[0] else ''}
-                if client_address[0] == str(incoming_packet.source_address) and client_address[0] == self.lead_address[0]:
-                    if incoming_packet.transmission_range < self.transmission_range:
+                if client_address[0] == str(incoming_packet.source_address):
+                    if incoming_packet.transmission_range < self.transmission_range and client_address[0] != self.following_address[0]:
                         # Packet coming straight from source and exceeds range, drop it
-
-                        self.vehicle_ahead_address = None
                         print(f"Silently dropping packet from {incoming_packet.source_name} as it exceeds range.")
                         continue
                     print(f"Packet #{incoming_packet.sequence_number} received from {incoming_packet.source_name}")
                 else:
                     # Different senders, so return packet to referer
                     print(f"Packet #{incoming_packet.sequence_number} received from {incoming_packet.source_name}")
-                    print(f"\t└ forwarded by ({client_address[0]})")
+                    print(f"\t└ forwarded by ({self.following_name})")
 
                 # Notify receipt of packet and parse as a string
                 packet_string = bytes.decode(incoming_data, 'utf-8').replace('\n', '\n\t')
@@ -467,12 +464,14 @@ class FleetVehicle(Vehicle):
                     print(f"Packet Data:\n\t{packet_string}\n")
 
                     # Send acknowledgement
-                    print(f"\nSending ACK #{incoming_packet.sequence_number} to {client_address[0]}.")
-                    self.socket.sendto(bytes(f"ACK {incoming_packet.sequence_number} {self.address} {self.name}", 'utf-8'), client_address)
+                    print(f"\nSending ACK #{incoming_packet.sequence_number} to {self.following_name}{' intended for Lead' if incoming_packet.destination_name != self.following_name else ''}.")
+                    self.socket.sendto(bytes(f"ACK {incoming_packet.sequence_number} {self.address} {str(incoming_packet.source_address)} {self.name}", 'utf-8'), client_address)
+                    if not self.following_address:
+                        self.following_address = client_address
 
                     # Copy, but skip updates until we have values from lead vehicle
                     if incoming_packet.source_name != "Lead":
-                        self.last_seq_followed += 1
+                        self.last_seq_received += 1
                         continue
                     num_pkts += 1
 
@@ -494,20 +493,24 @@ class FleetVehicle(Vehicle):
 
                 else:
                     # Do not pass go, do not collect 200, immediately forward packet
-                    print(f"\n\tForwarding packet to Fleet Vehicle {incoming_packet.destination_name} ({destination_address}:{self.port})...\n")
+                    print(f"\t└ forwarding packet to Follower Vehicle {incoming_packet.destination_name}...")
                     self.socket.sendto(incoming_data, (destination_address, self.port))
             else:
-                print(f"Silently dropping packet from {incoming_packet.source_address} as it exceeds range.")
+                raise ValueError("This is not a packet?")
 
-            # Use arrival of last packet to send out a packet on time
-            self.packet.sequence_number = self.last_seq_followed + 1
-            # print(self.sensor.acceleration)
-            # self.packet.acceleration = self.sensor.acceleration
-            # # print(str(self.sensor.acceleration) + " failed")
-            # self.packet.velocity = self.sensor.velocity
-            # # print(str(self.sensor.gas_throttle) + " failed")
-            # # print(str(self.sensor.brake_control) + " failed")
-            # self.packet.gas_throttle = self.sensor.gas_throttle
-            # self.packet.brake_control = self.sensor.brake_control
-            # self.packet.gps_position = self.sensor.gps_instant
-            self.socket.sendto(self.packet.get_packet(), (str(self.packet.destination_address), self.port))
+            # Don't send packages if at the end of the line
+            if self.follower_name != self.name:
+                # Use arrival of last packet to send out a packet on time
+                self.packet.sequence_number = self.last_seq_sent + 1
+                # print(self.sensor.acceleration)
+                # self.packet.acceleration = self.sensor.acceleration
+                # # print(str(self.sensor.acceleration) + " failed")
+                # self.packet.velocity = self.sensor.velocity
+                # # print(str(self.sensor.gas_throttle) + " failed")
+                # # print(str(self.sensor.brake_control) + " failed")
+                # self.packet.gas_throttle = self.sensor.gas_throttle
+                # self.packet.brake_control = self.sensor.brake_control
+                # self.packet.gps_position = self.sensor.gps_instant
+                print(f"Broadcasted SEQ #{self.packet.sequence_number} to {str(self.packet.destination_address)}")
+                self.socket.sendto(self.packet.get_packet(), (str(self.packet.destination_address), self.port))
+
