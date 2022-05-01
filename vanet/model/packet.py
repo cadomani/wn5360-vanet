@@ -13,13 +13,13 @@ class Coordinates(BaseModel):
     @validator('longitude')
     def check_longitude_values(cls, v):
         if v > 180 or v < -180:
-            raise ValidationError("Longitude values must be between [-180, 180].")
+            raise ValueError("Longitude values must be between [-180, 180].")
         return v.__round__(5)
 
     @validator('latitude')
     def check_latitude_values(cls, v):
         if v > 90 or v < -90:
-            raise ValidationError("Latitude values must be between [-90, 90].")
+            raise ValueError("Latitude values must be between [-90, 90].")
         return v.__round__(5)
 
     def __str__(self):
@@ -58,25 +58,25 @@ class Packet(BaseModel):
     @validator("sequence_number")
     def check_valid_sequence(cls, v, values):
         if v < 0 or v > 9999:
-            raise ValidationError("Packet sequences should be between 0 and 9999.")
+            raise ValueError("Packet sequences should be between 0 and 9999.")
         return v
 
     @validator("velocity")
     def check_velocity_range(cls, v):
         if v < 0 or v > 300:
-            raise ValidationError("Velocity should be between 0 and 300 kph.")
+            raise ValueError("Velocity should be between 0 and 300 kph.")
         return v
 
     @validator("acceleration")
     def check_acceleration_range(cls, v):
         if v < -15 or v > 15:
-            raise ValidationError("Acceleration should be between -15 and 15 m/s^2.")
+            raise ValueError("Acceleration should be between -15 and 15 m/s^2.")
         return v
 
     @validator("brake_control", "gas_throttle")
     def check_pedal_ranges(cls, v):
         if v < 0 or v > 100:
-            raise ValidationError("Pedal values should be between 0 and 100.")
+            raise ValueError("Pedal values should be between 0 and 100.")
         return v
 
     # GENERATORS

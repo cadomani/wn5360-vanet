@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import math
 import random
 import time
 from socket import socket, AF_INET, SOCK_DGRAM
@@ -52,6 +53,10 @@ class VehicleSensor:
         BrakeControl:       0           -> 100
         GasThrottle:        0           -> 100
     """
+    AIR_RESISTANCE_AND_FRICTION_FORCE = 10  # Combined countering forces in m/s^2
+    BRAKING_FORCE_MULTIPLIER = 20  # Combined countering force constant from braking
+    ACCELERATION_FORCE_MULTIPLIER = 15  # Combined contributing force constant from acceleration
+
     def __init__(self):
         # Generate fleet starting coordinates
         self.gps_initial = Coordinates(
@@ -97,12 +102,26 @@ class VehicleSensor:
             # Brake and gas pedals determine acceleration, their values are mutually exclusive
             pedal_value = random.uniform(0, 100)
             pedal_choice = random.uniform(0, 20)
+
+            # Override if velocity is approaching outside bounds
+            if self.velocity > 95:
+                pedal_choice = 0
+            elif self.velocity < 30:
+                pedal_choice = 1
+
+            # Randomly choose pedal to update where most updates are for acceleration
             if pedal_choice < 1:
                 self.brake_control = pedal_value
                 self.gas_throttle = 0
+
+                # Update velocity from pedals and multiplier
+                self.velocity -= VehicleSensor.BRAKING_FORCE_MULTIPLIER * (pedal_value / 100)
             else:
                 self.gas_throttle = pedal_value
                 self.brake_control = 0
+
+                # Update velocity from pedals and multiplier
+                self.velocity += VehicleSensor.ACCELERATION_FORCE_MULTIPLIER * (pedal_value / 100)
 
     def _determine_location(self):
         pass
@@ -111,65 +130,98 @@ class VehicleSensor:
         """ Use previous acceleration to calculate velocity and new instantaneous position """
         pass
 
-    def update(self):
-        self._pedal_change()
+    def update(self, time_delta: float, incoming_velocity: float = 0, incoming_acceleration: float = 0):
+        # Gather a new velocity first if lead vehicle
+        if incoming_velocity == 0:
+            self._pedal_change()
+        else:
+            # Override velocity and acceleration if not a follower
+            # Velocity is v_current + a_instantaneous * time_delta
+            self.velocity += (self.velocity + (incoming_acceleration * time_delta))
+            self.acceleration = (self.velocity - incoming_velocity) / time_delta
+            self.gas_throttle = 0 if self.acceleration <= 0 else (100 * ((15 - self.acceleration) / 15))
+            self.brake_control = 0 if self.acceleration >= 0 else (100 * ((15 - (1 / self.acceleration)) / 15))
+
+        # Move ahead by calculating naive velocity "speed" times the time taken
+        moved_ahead_pos = incoming_velocity * time_delta
+
+        # Decompose identical vectors to simulate a 45 degree travel path northwest
+        comp_decomp_x = math.sqrt((moved_ahead_pos ** 2 + moved_ahead_pos ** 2)) / 1000
+        comp_decomp_y = math.sqrt((moved_ahead_pos ** 2 + moved_ahead_pos ** 2)) / 1000
+
+        # Update coordinates using decomposition values
+        self.gps_instant = Coordinates(
+            longitude=self.gps_instant.longitude + comp_decomp_x,
+            latitude=self.gps_instant.latitude + comp_decomp_y
+        )
 
 
 class Vehicle:
-    def __init__(self, *, vehicle_type: str, address: str):
+    def __init__(self, vehicle_type: str, vehicle_name: str, vehicle_address: tuple, follower_address: str, follower_name: str, transmission_range: float):
         # Define an AF_INET UDP socket for data transmission and reception
         self.socket = socket(AF_INET, SOCK_DGRAM)
 
-        # Vehicle sensor data and packet instance
-        self.data: VehicleSensor
-        self.packet: Packet
-
-        # Print parameters to console for a general vehicle until we specialize
-        print(f"VANET Fleet\nVehicle: {vehicle_type}\nIP Address: {address}\n")
-
-
-class LeadVehicle(Vehicle):
-    def __init__(self, address: str, followers: List[Client]):
-        super().__init__(vehicle_type="Lead", address=address)
-
-        # Set socket to non-blocking to allow for sending without waiting for acknowledgement
-        self.socket.settimeout(0.2)
-
-        # Global flags
-        self.destination_reached = False
-        self.polls = 0
-        self.followers = followers
-        self.sequence = 1
-        self.periodic_delay_ms = 200
-        self.periodic_delay_s = self.periodic_delay_ms / 1000
+        # Global fields
+        self.name = vehicle_name
+        self.address_pair = vehicle_address
+        self.address, self.port = self.address_pair
+        self.follower_name = follower_name if follower_name != "-" else self.name
+        self.follower_address = follower_address if follower_address != "-" else self.address
+        self.transmission_range = transmission_range
 
         # Vehicle sensor data and packet instance
         self.sensor = VehicleSensor()
         self.packet = Packet(
-            sequence_number=self.sequence,
-            source_address=IPv4Address(address),
-            destination_address=IPv4Address(address),
-            source_name="Lead",
-            destination_name="",
+            sequence_number=0,
+            source_address=IPv4Address(self.address),
+            destination_address=IPv4Address(self.follower_address),
+            source_name=self.name,
+            destination_name=self.follower_name,
             gps_position=self.sensor.gps_instant,
             velocity=self.sensor.velocity,
             acceleration=self.sensor.acceleration,
             brake_control=self.sensor.brake_control,
             gas_throttle=self.sensor.gas_throttle,
-            transmission_range=50.0
+            transmission_range=self.transmission_range
         )
+
+        # Print parameters to console for a general vehicle until we specialize
+        print("Initiating" if vehicle_type == "Lead" else "Joining", end=" ")
+        print(f"VANET Fleet\nThis Vehicle:\t{self.name} ({self.address})")
+
+
+class LeadVehicle(Vehicle):
+    def __init__(self, vehicle_address: str, followers: List[Client], transmission_range: float = 90.0, transmission_delay_ms: float = 5000):
+        # Initialize a standard vehicle with sensors and packet object
+        super().__init__(
+            vehicle_type="Lead",
+            vehicle_name="Lead",
+            vehicle_address=(vehicle_address, 9885),
+            follower_name=followers[0].name,
+            follower_address=followers[0].address,
+            transmission_range=transmission_range
+        )
+
+        # Set socket to non-blocking to allow for sending without waiting for acknowledgement
+        self.socket.settimeout(0.2)
+
+        # Global flags
+        self.polls = 0
+        self.sequence = 1
+        self.followers = followers
+        self.lead_fleet_failure = False
+        self.destination_reached = False
+        self.periodic_delay_ms = transmission_delay_ms
 
         # Print parameters to console and back an initialized vehicle
         print(f"Coordinates:\n\tStart:\t{self.sensor.gps_initial}\n\tEnd:\t{self.sensor.gps_final}\n")
 
-        self._drive(sample_rate=10)
+        # Begin driving
+        self._drive()
 
-    def _drive(self, *, sample_rate: int):
+    def _drive(self):
         # Log number of total acknowledgements
         total_acknowledgements = 0
-
-        # Allow failures to direct leader only once in case the tail vehicle was busy processing other packets
-        lead_tail_fails = False
 
         # Lead driver for n-cycles, start transmitting
         while not self.destination_reached:
@@ -182,7 +234,7 @@ class LeadVehicle(Vehicle):
             print("--------------")
             print(f"Broadcasted SEQ #{self.sequence} to client(s):")
             for follower in self.followers:
-                # Skip follower if if 20 packets have been successfully sent to them
+                # Skip follower if 20 packets have been successfully sent to them
                 if follower.last_received == 20:
                     continue
 
@@ -209,10 +261,10 @@ class LeadVehicle(Vehicle):
                     while forwarder is None:
                         # Assert that we're not trying to tunnel through and missed the first vehicle
                         if follower.order == 0 or parent_vehicle is None:
-                            raise NotImplementedError("Shouldn't be finding the follower of the second vehicle...")
+                            raise ValueError("The leading fleet vehicle shouldn't need tunneling.")
 
                         # Keep track of the current vehicle and find the first parent that is not out of bounds
-                        print(f"\t\twill be forwarded by {parent_vehicle}")
+                        print(f"\t └ will be forwarded by {parent_vehicle}")
                         if not parent_vehicle.out_of_range:
                             forwarder = parent_vehicle
                         parent_vehicle = parent_vehicle.vehicle_ahead
@@ -220,17 +272,18 @@ class LeadVehicle(Vehicle):
                     # Found the forwarder to tunnel through, now we can tunnel
                     self.socket.sendto(self.packet.get_packet(), forwarder.get_address_pair())
                 packets_sent += 1
-            print("Waiting 200ms before next retransmission.")
+            # print("Waiting 200ms before next retransmission.")
 
             # TODO: This shows a sample packet instead of all packets to avoid bloating screen, at the end replace it with all
             # print("\nDATA: \n\t" + bytes.decode(new_packet, 'utf-8').replace('\n', '\n\t'))
-            print("\n")
+            print("")
 
             # Listen until timeout until all packages come in, unless there is a timeout
             timestamp_received = -1.0
             try:
+                print(f"Awaiting acknowledgement packages during {self.periodic_delay_ms}ms wait.")
                 while packets_sent != acknowledgements_received:
-                    # Receive 8 bytes from a single client
+                    # Receive up to 50 bytes from a single client
                     response_msg, server_address = self.socket.recvfrom(50)
                     acknowledgements_received += 1
                     incoming_acknowledgement = Acknowledgement().process_packet(data=response_msg)
@@ -241,90 +294,107 @@ class LeadVehicle(Vehicle):
                         client = self.followers[self.followers.index(incoming_acknowledgement.origin_address)]
 
                         # Reset failure flag for direct follower on retransmission
-                        if lead_tail_fails and client.order == 0:
-                            lead_tail_fails = False
+                        if self.lead_fleet_failure and client.order == 0:
+                            self.lead_fleet_failure = False
 
                         # Update the last received packet sequence number for this client
                         client.last_received += 1
-                        print(f"SEQ #{incoming_acknowledgement.sequence} ACK'ed by {incoming_acknowledgement.vehicle_name}", end=" ")
-                        if client.address != incoming_acknowledgement.origin_address:
-                            print(f"(forwarded by {client.name})")
-                        else:
-                            print("")
+                        print(f"\t└ SEQ #{incoming_acknowledgement.sequence} ACK'ed by {incoming_acknowledgement.vehicle_name}", end=" ")
+                        print(f"(forwarded by {client.name})" if server_address[0] != incoming_acknowledgement.origin_address else " ")
                     except ValueError:
-                        raise NotImplementedError("\t[ERROR]\tClient was not found, is the IP address set correctly in the header?")
+                        raise NotImplementedError("\n\t[ ERROR ] - Client was not found, is the IP address set correctly in the header?\n")
 
                     # Keep only the first timestamp as it is the one associated with retransmission
                     if timestamp_received == -1.0:
                         timestamp_received = datetime.datetime.utcnow().timestamp()
                     total_acknowledgements += 1
-            except TimeoutError as e:
-                # Find follower
+            except TimeoutError:
+                # Find failing followers from list of followers
                 for follower in self.followers:
+                    # Filter by followers where the last received package is not the last one that was attempted
                     if follower.last_received != follower.last_attempted:
-                        # If the follower order is for the next vehicle, end immediately for now TODO: simply try retransmission of new immediately (unstable connection)
+                        # If the follower order is for the leading fleet vehicle, set a flag to allow for retransmission once more
                         if follower.order == 0:
-                            print(f"Direct follower ({follower.name}) failed to acknowledge.")
-                            if lead_tail_fails:
-                                raise ValueError("Several fails detected for vehicle directly behind lead. Is there a transmission issue?")
-                            print(f"\tRetry once more in case client was busy.")
-                            lead_tail_fails = True
+                            # End program if this is the second run with an issue on le leading fleet vehicle
+                            if self.lead_fleet_failure:
+                                raise ValueError("\n\t[ ERROR ] Several fails detected for vehicle directly behind lead. Is there a transmission issue?\n")
+                            self.lead_fleet_failure = True
+
+                            # Notify of acknowledgement failure and expect
+                            print(f"[ WARN ] Lead fleet vehicle ({follower.name}) failed to acknowledge.")
+                            print(f"\t└ retry once more in case client was busy.")
                             continue
 
                         # Mark client as one needing tunneling
                         print(f"{follower} never acknowledged SEQ #{follower.last_attempted}")
-                        print(f"\t will attempt to tunnel through {self.followers[follower.order - 1]} next time")
+                        print(f"\t└ tunnel through {self.followers[follower.order - 1]} next time")
                         follower.out_of_range = True
 
-            # For testing, only perform a certain number of updates before ending transmissions
+            # Mark a sensor poll even if transmission was unsuccessful to prevent infinite loops
             self.polls += 1
             self.sequence += 1
 
+            # Update sensor by providing a time delta of 200 ms
+            self.sensor.update(time_delta=0.2)
+
             # Generate new values to use as a packet that can be transmitted
-            self.sensor.update()
-            self.packet.sequence_number = self.sequence
             self.packet.acceleration = self.sensor.acceleration
             self.packet.velocity = self.sensor.velocity
             self.packet.gas_throttle = self.sensor.gas_throttle
             self.packet.brake_control = self.sensor.brake_control
+            self.packet.gps_position = self.sensor.gps_instant
 
             # End ride after 30 sensor updates
             if self.polls >= 25:
                 self.destination_reached = True
 
-            # Sleep for 2000 milliseconds
+            # Sleep for the remaining amount of the transmission delay milliseconds
             transmission_delay = timestamp_received - self.packet.timestamp
             if transmission_delay < self.periodic_delay_ms and timestamp_received != -1:
+                # Only log initial ACK received, not all of them
                 print(f"Initial ACK received {int(transmission_delay * 1000)}ms after broadcast.")
                 print(f"Waiting an additional {self.periodic_delay_ms - int(transmission_delay * 1000)}ms to send next packet.")
-                sleep_delay = self.periodic_delay_s - transmission_delay
+
+                # TODO: DEBUG - Paused due to debugging, but should continue instead of crashing
+                sleep_delay = (self.periodic_delay_ms / 1000) - transmission_delay
                 if sleep_delay > 0:
-                    # Paused due to debugging, but should continue instead of crashing
                     time.sleep(sleep_delay)
-            elif transmission_delay > self.periodic_delay_s:
+            elif transmission_delay > (self.periodic_delay_ms / 1000):
                 print(f"Acknowledgement received over 100ms after broadcast ({int(transmission_delay * 1000)}ms).\nSending next packet immediately.\n")
             print("--------------\n\n")
 
 
 class FleetVehicle(Vehicle):
-    def __init__(self, vehicle_name: str, address: tuple):
-        super().__init__(vehicle_type="Fleet", address=address[0])
+    def __init__(self, vehicle_name: str, vehicle_address: tuple, follower_address: str, follower_name: str, transmission_range: float):
+        # Initialize a fleet vehicle type
+        super().__init__(
+            vehicle_type="Fleet",
+            vehicle_name=vehicle_name,
+            vehicle_address=vehicle_address,
+            follower_address=follower_address,
+            follower_name=follower_name,
+            transmission_range=transmission_range
+        )
+
         # Bind to address for listening
-        self.socket.bind(address)
+        self.socket.bind(self.address_pair)
 
-        # Variables
-        self.name = vehicle_name
-        self.address = address[0]
-        self.port = address[1]
+        # Transmission variables
+        self.lead_address = None
         self.last_seq = 0
-        self.lead_address_pair = ""
         self.last_seq_forwarded = 0
+        self.last_seq_followed = 0
+        self.vehicle_ahead_address = None
+        self.last_pkt_recv_time = None
 
-        # Temporarily set an arbitrary max dropoff range
-        self.distance_away = 35.0
-        if self.name == "Z":
-            print("Setting distance for Z to 80m")
-            self.distance_away = 80
+        # Print out following vehicles
+        if self.follower_name != self.name:
+            print(f"Rear Vehicle:\t {self.follower_name} ({self.follower_address})")
+        else:
+            print("Last vehicle in fleet.")
+
+        # Use transmission range differently here
+        print(f"Vehicle is {self.transmission_range}m away from lead vehicle\n")
 
         # Set to following mode
         self._follow()
@@ -336,18 +406,24 @@ class FleetVehicle(Vehicle):
             # Await packet from client to generate new sensor values
             incoming_data, client_address = self.socket.recvfrom(300)
 
-            # Capture lead address if this is the first run
-            if not self.lead_address_pair:
-                self.lead_address_pair = client_address
+            # Capture lead address if this is the first, but not if we don't know the lead address yet
+            if not self.vehicle_ahead_address and self.lead_address and len(incoming_data) > 100:
+                if self.lead_address[0] == client_address[0]:
+                    self.vehicle_ahead_address = self.lead_address
+                else:
+                    self.vehicle_ahead_address = client_address
+                print(f"SET VEHICLE AHEAD ADDRESS TO {self.vehicle_ahead_address}")
 
-            # Attempt to parse incoming packet
-            if len(incoming_data) < 50:
-                # Assume this is an acknowledgement packet first if it's under a certain length
+            # Assume this is an acknowledgement packet first if it's under a certain length, and do not process ACK requests until we know what the lead address is
+            if len(incoming_data) < 50 and self.lead_address:
+                # Attempt to parse incoming packet
                 incoming_packet = Acknowledgement().process_packet(data=incoming_data)
 
                 # If processing does not fail, proceed to forward acknowledgement
-                print(f"Forwarding ACK #{incoming_packet.sequence} from Fleet Vehicle {incoming_packet.vehicle_name} ({incoming_packet.origin_address}) to Lead {self.lead_address_pair[0]}")
-                self.socket.sendto(incoming_data, self.lead_address_pair)
+                if not self.vehicle_ahead_address:
+                    self.vehicle_ahead_address = self.lead_address
+                print(f"Forwarding ACK #{incoming_packet.sequence} from Fleet Vehicle {incoming_packet.vehicle_name} to {self.vehicle_ahead_address}")
+                self.socket.sendto(incoming_data, self.vehicle_ahead_address)
 
                 # Set last sequence forwarded so we don't shut this vehicle down if it needs to continue to forward packets
                 self.last_seq_forwarded = incoming_packet.sequence
@@ -358,19 +434,24 @@ class FleetVehicle(Vehicle):
 
             # Process packet if it is not empty
             if incoming_packet:
-                # If the packet address is the same as the sender (not being forwarded), it should not surpass the range boundary
-                # print(client_address[0], incoming_packet.source_address)
-                # print(incoming_packet.transmission_range, self.distance_away)
-                print(f"Packet #{incoming_packet.sequence_number} received from {incoming_packet.source_name} ({incoming_packet.source_address})", end=" ")
-                if client_address[0] == str(incoming_packet.source_address):
-                    if incoming_packet.transmission_range < self.distance_away:
+                # Capture lead address if this is the first run
+                if not self.lead_address and str(incoming_packet.source_address) == client_address[0]:
+                    self.lead_address = client_address
+                    print(f"SET LEAD ADDRESS TO {self.lead_address}")
+
+                # If the packet address is the same as the sender (not being forwarded), it should not surpass the range boundary {' forwarded by' if client_address[0] != self.lead_address_pair[0] else ''}
+                if client_address[0] == str(incoming_packet.source_address) and client_address[0] == self.lead_address[0]:
+                    if incoming_packet.transmission_range < self.transmission_range:
                         # Packet coming straight from source and exceeds range, drop it
-                        self.lead_address_pair = None
-                        print(f"Silently dropping packet from {incoming_packet.source_address} as it exceeds range.")
+
+                        self.vehicle_ahead_address = None
+                        print(f"Silently dropping packet from {incoming_packet.source_name} as it exceeds range.")
                         continue
+                    print(f"Packet #{incoming_packet.sequence_number} received from {incoming_packet.source_name}")
                 else:
                     # Different senders, so return packet to referer
-                    print(f"(forwarded by {client_address[0]})", end="")
+                    print(f"Packet #{incoming_packet.sequence_number} received from {incoming_packet.source_name}")
+                    print(f"\t└ forwarded by ({client_address[0]})")
 
                 # Notify receipt of packet and parse as a string
                 packet_string = bytes.decode(incoming_data, 'utf-8').replace('\n', '\n\t')
@@ -380,17 +461,53 @@ class FleetVehicle(Vehicle):
                 if self.address == destination_address:
                     # Update last sequence from packet data
                     self.last_seq = incoming_packet.sequence_number
-
-                    # Send acknowledgement
-                    print(f"\nSending ACK #{incoming_packet.sequence_number} to {client_address}.")
-                    self.socket.sendto(bytes(f"ACK {incoming_packet.sequence_number} {self.address} {self.name}", 'utf-8'), client_address)
-                    num_pkts += 1
+                    self.last_pkt_recv_time = datetime.datetime.utcnow().timestamp()
 
                     # Show data that was received
-                    print(f"\t{packet_string}\n")
+                    print(f"Packet Data:\n\t{packet_string}\n")
+
+                    # Send acknowledgement
+                    print(f"\nSending ACK #{incoming_packet.sequence_number} to {client_address[0]}.")
+                    self.socket.sendto(bytes(f"ACK {incoming_packet.sequence_number} {self.address} {self.name}", 'utf-8'), client_address)
+
+                    # Copy, but skip updates until we have values from lead vehicle
+                    if incoming_packet.source_name != "Lead":
+                        self.last_seq_followed += 1
+                        continue
+                    num_pkts += 1
+
+                    # Update vehicle data based on location and current speed
+                    time_delta = datetime.datetime.now().timestamp() - self.last_pkt_recv_time
+                    self.sensor.update(
+                        time_delta=time_delta,
+                        incoming_velocity=incoming_packet.velocity,
+                        incoming_acceleration=incoming_packet.acceleration
+                    )
+
+                    print("Updating navigation based on last transmission...")
+                    print(f"\tMoved ahead {incoming_packet.velocity * time_delta} meters")
+                    print(f"\tNew position: {self.sensor.gps_instant}")
+                    print(f"\tNew acceleration: {self.sensor.acceleration}")
+                    print(f"\tNew velocity: {self.sensor.velocity}")
+                    print(f"\tNew gas pedal reading: {self.sensor.gas_throttle}")
+                    print(f"\tNew brake pedal reading: {self.sensor.brake_control}")
+
                 else:
                     # Do not pass go, do not collect 200, immediately forward packet
                     print(f"\n\tForwarding packet to Fleet Vehicle {incoming_packet.destination_name} ({destination_address}:{self.port})...\n")
                     self.socket.sendto(incoming_data, (destination_address, self.port))
             else:
                 print(f"Silently dropping packet from {incoming_packet.source_address} as it exceeds range.")
+
+            # Use arrival of last packet to send out a packet on time
+            self.packet.sequence_number = self.last_seq_followed + 1
+            # print(self.sensor.acceleration)
+            # self.packet.acceleration = self.sensor.acceleration
+            # # print(str(self.sensor.acceleration) + " failed")
+            # self.packet.velocity = self.sensor.velocity
+            # # print(str(self.sensor.gas_throttle) + " failed")
+            # # print(str(self.sensor.brake_control) + " failed")
+            # self.packet.gas_throttle = self.sensor.gas_throttle
+            # self.packet.brake_control = self.sensor.brake_control
+            # self.packet.gps_position = self.sensor.gps_instant
+            self.socket.sendto(self.packet.get_packet(), (str(self.packet.destination_address), self.port))
