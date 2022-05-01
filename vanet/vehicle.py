@@ -382,7 +382,7 @@ class FleetVehicle(Vehicle):
         # Transmission variables
         self.last_seq = 0
         self.last_seq_forwarded = 0
-        self.last_seq_sent = 0
+        self.last_seq_sent = 1
         self.last_seq_received = 0
         self.last_pkt_recv_time = None
         self.following_address = (following_address, self.port) if following_name != "Lead" else None
@@ -464,7 +464,9 @@ class FleetVehicle(Vehicle):
                     print(f"Packet Data:\n\t{packet_string}\n")
 
                     # Send acknowledgement
-                    print(f"\nSending ACK #{incoming_packet.sequence_number} to {self.following_name}{' intended for Lead' if incoming_packet.destination_name != self.following_name else ''}.")
+                    print("RECEIVED A PACKET THAT MATCHES OUR ADDRESS")
+                    print(incoming_packet)
+                    print(f"\nSending ACK #{incoming_packet.sequence_number} to {self.following_name}{' intended for Lead' if incoming_packet.source_name != self.following_name else ''}.")
                     self.socket.sendto(bytes(f"ACK {incoming_packet.sequence_number} {self.address} {str(incoming_packet.source_address)} {self.name}", 'utf-8'), client_address)
                     if not self.following_address:
                         self.following_address = client_address
@@ -491,26 +493,26 @@ class FleetVehicle(Vehicle):
                     print(f"\tNew gas pedal reading: {self.sensor.gas_throttle}")
                     print(f"\tNew brake pedal reading: {self.sensor.brake_control}")
 
+                    # Use incoming packet opportunity to send own packet. Don't send packages if at the end of the line.
+                    if self.follower_name != self.name:
+                        # Use arrival of last packet to send out a packet on time
+                        self.packet.sequence_number = self.last_seq_sent
+                        # print(self.sensor.acceleration)
+                        # self.packet.acceleration = self.sensor.acceleration
+                        # # print(str(self.sensor.acceleration) + " failed")
+                        # self.packet.velocity = self.sensor.velocity
+                        # # print(str(self.sensor.gas_throttle) + " failed")
+                        # # print(str(self.sensor.brake_control) + " failed")
+                        # self.packet.gas_throttle = self.sensor.gas_throttle
+                        # self.packet.brake_control = self.sensor.brake_control
+                        # self.packet.gps_position = self.sensor.gps_instant
+                        print(f"Broadcasted SEQ #{self.packet.sequence_number} to {str(self.packet.destination_address)}")
+                        self.socket.sendto(self.packet.get_packet(), (str(self.packet.destination_address), self.port))
+
                 else:
                     # Do not pass go, do not collect 200, immediately forward packet
                     print(f"\t└ forwarding packet to Follower Vehicle {incoming_packet.destination_name}...")
                     self.socket.sendto(incoming_data, (destination_address, self.port))
+
             else:
                 raise ValueError("This is not a packet?")
-
-            # Don't send packages if at the end of the line
-            if self.follower_name != self.name:
-                # Use arrival of last packet to send out a packet on time
-                self.packet.sequence_number = self.last_seq_sent + 1
-                # print(self.sensor.acceleration)
-                # self.packet.acceleration = self.sensor.acceleration
-                # # print(str(self.sensor.acceleration) + " failed")
-                # self.packet.velocity = self.sensor.velocity
-                # # print(str(self.sensor.gas_throttle) + " failed")
-                # # print(str(self.sensor.brake_control) + " failed")
-                # self.packet.gas_throttle = self.sensor.gas_throttle
-                # self.packet.brake_control = self.sensor.brake_control
-                # self.packet.gps_position = self.sensor.gps_instant
-                print(f"Broadcasted SEQ #{self.packet.sequence_number} to {str(self.packet.destination_address)}")
-                self.socket.sendto(self.packet.get_packet(), (str(self.packet.destination_address), self.port))
-
