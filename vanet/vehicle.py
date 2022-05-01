@@ -230,6 +230,15 @@ class LeadVehicle(Vehicle):
             packets_sent = 0
             acknowledgements_received = 0
 
+            # End immediately if all followers submitted 20 packets
+            for follower in self.followers:
+                if follower.last_received != 20:
+                    break
+            else:
+                # If all of them were 20, then we should reach our destination
+                self.destination_reached = True
+                break
+
             # Start broadcasting blindly to clients
             print("--------------")
             print(f"Broadcasted SEQ #{self.sequence} to client(s):")
@@ -292,6 +301,7 @@ class LeadVehicle(Vehicle):
                     try:
                         # Find client from packet address
                         client = self.followers[self.followers.index(incoming_acknowledgement.origin_address)]
+                        forwarder = self.followers[self.followers.index(server_address[0])]
 
                         # Reset failure flag for direct follower on retransmission
                         if self.lead_fleet_failure and client.order == 0:
@@ -300,7 +310,7 @@ class LeadVehicle(Vehicle):
                         # Update the last received packet sequence number for this client
                         client.last_received += 1
                         print(f"\t└ SEQ #{incoming_acknowledgement.sequence} ACK'ed by {incoming_acknowledgement.vehicle_name}", end=" ")
-                        print(f"(forwarded by {client.name})" if server_address[0] != incoming_acknowledgement.origin_address else " ")
+                        print(f"(forwarded by {forwarder})" if server_address[0] != incoming_acknowledgement.origin_address else " ")
                     except ValueError:
                         raise NotImplementedError("\n\t[ ERROR ] - Client was not found, is the IP address set correctly in the header?\n")
 
@@ -388,6 +398,9 @@ class FleetVehicle(Vehicle):
         self.following_address = (following_address, self.port) if following_name != "Lead" else None
         self.following_name = following_name
 
+        # EXTRA CREDIT
+        self.flooding_protocol_container = {}
+
         # Print out following vehicles
         if self.following_name != "Lead":
             print(f"Vehicle ahead:\t{self.following_name} ({self.following_address[0]})")
@@ -405,7 +418,7 @@ class FleetVehicle(Vehicle):
     def _follow(self):
         # React to lead vehicle driving data if follower, generate data to send to subscribed vehicles
         num_pkts = 0
-        while not num_pkts >= 25 and self.last_seq_forwarded != 20:
+        while not num_pkts >= 25 and self.last_seq_forwarded != 21:
             # Await packet from client to generate new sensor values
             incoming_data, client_address = self.socket.recvfrom(300)
 
@@ -431,6 +444,11 @@ class FleetVehicle(Vehicle):
 
                     # Set last sequence forwarded so we don't shut this vehicle down if it needs to continue to forward packets
                     self.last_seq_forwarded = incoming_packet.sequence
+
+                    # Check flooding protocol container to see if we logged 21 packets
+                    if self.flooding_protocol_container.get('DONE'):
+                        break
+                # Do not continue parsing, start listening for the next packet
                 continue
 
             # Otherwise, try to process as a data packet
@@ -457,15 +475,14 @@ class FleetVehicle(Vehicle):
                 destination_address = str(incoming_packet.destination_address)
                 if self.address == destination_address:
                     # Update last sequence from packet data
-                    self.last_seq = incoming_packet.sequence_number
                     self.last_pkt_recv_time = datetime.datetime.utcnow().timestamp()
 
                     # Show data that was received
                     print(f"Packet Data:\n\t{packet_string}\n")
 
                     # Send acknowledgement
-                    print("RECEIVED A PACKET THAT MATCHES OUR ADDRESS")
-                    print(incoming_packet)
+                    # print("RECEIVED A PACKET THAT MATCHES OUR ADDRESS")
+                    # print(incoming_packet)
                     print(f"\nSending ACK #{incoming_packet.sequence_number} to {self.following_name}{' intended for Lead' if incoming_packet.source_name != self.following_name else ''}.")
                     self.socket.sendto(bytes(f"ACK {incoming_packet.sequence_number} {self.address} {str(incoming_packet.source_address)} {self.name}", 'utf-8'), client_address)
                     if not self.following_address:
@@ -475,6 +492,8 @@ class FleetVehicle(Vehicle):
                     if incoming_packet.source_name != "Lead":
                         self.last_seq_received += 1
                         continue
+                    else:
+                        self.last_seq = incoming_packet.sequence_number
                     num_pkts += 1
 
                     # Update vehicle data based on location and current speed
@@ -510,9 +529,31 @@ class FleetVehicle(Vehicle):
                         self.socket.sendto(self.packet.get_packet(), (str(self.packet.destination_address), self.port))
 
                 else:
-                    # Do not pass go, do not collect 200, immediately forward packet
-                    print(f"\t└ forwarding packet to Follower Vehicle {incoming_packet.destination_name}...")
-                    self.socket.sendto(incoming_data, (destination_address, self.port))
+                    # Create array if there is none
+                    if self.flooding_protocol_container.get(incoming_packet.sequence_number) is None:
+                        self.flooding_protocol_container[incoming_packet.sequence_number] = []
+
+                    # If the target address not yet in the flooding container, forward it
+                    if str(incoming_packet.destination_address) not in self.flooding_protocol_container[incoming_packet.sequence_number]:
+                        # Do not pass go, do not collect 200, immediately forward packet
+                        print(f"\t└ forwarding packet to Follower Vehicle {incoming_packet.destination_name}...")
+                        self.socket.sendto(incoming_data, (destination_address, self.port))
+
+                        # Add to flooding protocol container so it does not get repeated
+                        self.flooding_protocol_container[incoming_packet.sequence_number].append(str(incoming_packet.destination_address))
+                    else:
+                        print(f"[ FLOODING PROTOCOL ] Packet with SEQ# {incoming_packet.sequence_number} en route to {str(incoming_packet.destination_address)} has already been sent and will not be rebroadcasted.")
 
             else:
-                raise ValueError("This is not a packet?")
+                raise ValueError("[ ERROR ] This is not a packet?")
+
+            # Use flooding protocol to determine if we should exit
+            if self.last_seq >= 20:
+                vals = len(self.flooding_protocol_container)
+                # Follower vehicle
+                if vals == 0:
+                    return None
+                # If the last container had as many sources as the last, then we're done
+                elif vals == 20 and len(self.flooding_protocol_container[20]) == len(self.flooding_protocol_container[1]):
+                    if self.last_seq_forwarded == 20:
+                        self.flooding_protocol_container['DONE'] = True
